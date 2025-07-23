@@ -1,0 +1,1 @@
+// checkout.ts placeholder content

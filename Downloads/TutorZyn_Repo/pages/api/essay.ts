@@ -1,0 +1,1 @@
+// essay.ts placeholder content

@@ -1,0 +1,1 @@
+// ocr.ts placeholder content

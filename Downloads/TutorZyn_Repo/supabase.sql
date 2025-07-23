@@ -1,0 +1,1 @@
+// supabase.sql placeholder content
