@@ -1,1 +1,89 @@
+# Environment variables
 .env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/*.log
+*.log
+
+# CSV and JSON exports
+*.csv
+*.json
+!ghl_config.json
+!package.json
+!requirements*.json
+
+# Lead limit tracking
+lead_limits.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Database
+*.db
+*.sqlite
+
+# Generated reports
+*_results_*.json
+*_results_*.csv
+*_report_*.json
+*_report_*.txt
+
+# Screenshots and images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# OS specific
+.Trash/
+Desktop.ini
+
+# Node modules (if any)
+node_modules/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
