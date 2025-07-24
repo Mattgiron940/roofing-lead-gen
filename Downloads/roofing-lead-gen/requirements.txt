@@ -1,0 +1,4 @@
+playwright
+requests
+python-dotenv
+pandas

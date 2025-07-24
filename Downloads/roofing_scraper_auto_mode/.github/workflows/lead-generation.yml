@@ -1,0 +1,81 @@
+name: Roofing Lead Generation
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # Daily at 6 AM
+    - cron: '0 18 * * *'  # Daily at 6 PM
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths: ['scrapers/**', '*.py']
+
+jobs:
+  scrape-leads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Run lead scrapers
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+        run: python master_threaded_scraper.py
+        
+      - name: Route leads
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python lead_router.py
+        
+      - name: Export daily report
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+        run: python lead_export.py --days 1
+        
+      - name: Send webhook notifications
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GHL_WEBHOOK_URL: ${{ secrets.GHL_WEBHOOK_URL }}
+          ZAPIER_WEBHOOK_URL: ${{ secrets.ZAPIER_WEBHOOK_URL }}
+        run: python webhook_integration.py
+
+  monitor-system:
+    runs-on: ubuntu-latest
+    needs: scrape-leads
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: System health check
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python -c "
+          from supabase_config import SupabaseConnection
+          conn = SupabaseConnection()
+          if conn.supabase:
+              print('✅ Supabase connection: OK')
+          else:
+              print('❌ Supabase connection: FAILED')
+              exit(1)
+          "
