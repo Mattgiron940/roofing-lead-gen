@@ -1,399 +1,668 @@
 #!/usr/bin/env python3
 """
-Storm/Hail Damage Data Integration
-Integrates HailTrace and NOAA feeds with scraped properties
-Matches ZIP codes to identify recent storm-hit areas for prioritization
+Storm Integration Module using ScraperAPI
+High-performance storm data collection with Supabase integration and real-time lead scoring
 """
 
-import requests
+import sys
+import os
+sys.path.append('..')
+
+import re
 import json
-import csv
+import requests
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Set
+import time
 import logging
-from supabase_config import insert_lead
+from typing import List, Dict, Any, Optional
+
+# Import unified Supabase client
+from supabase_client import supabase
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class StormDataIntegrator:
+class StormIntegration:
+    """High-performance storm data scraper with multi-threading and real-time insertion"""
+    
     def __init__(self):
+        self.scraper_api_key = self.get_scraper_api_key()
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        })
+        self.processed_urls = set()
         
-        # Storm data sources
-        self.data_sources = {
-            'noaa': {
-                'base_url': 'https://api.weather.gov',
-                'storm_endpoint': '/alerts',
-                'radar_endpoint': '/radar'
-            },
-            'hailtrace': {
-                'base_url': 'https://api.hailtrace.com',
-                'hail_endpoint': '/v1/hail-reports'
-            }
-        }
+        # Storm data URLs for Texas weather services
+        self.target_urls = self.generate_storm_urls()
+    
+    def get_scraper_api_key(self) -> str:
+        """Get ScraperAPI key from environment"""
+        # Try environment variable first
+        api_key = os.getenv('SCRAPER_API_KEY')
         
-        self.storm_events = []
-        self.affected_zipcodes = set()
-
-    def create_sample_storm_data(self) -> List[Dict]:
-        """Create realistic storm event data for Texas"""
+        if not api_key:
+            # Try Desktop .env file
+            desktop_env = os.path.expanduser("~/Desktop/.env")
+            if os.path.exists(desktop_env):
+                with open(desktop_env, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('SCRAPER_API_KEY='):
+                            api_key = line.split('=', 1)[1]
+                            break
         
-        # Recent storm events in Texas (sample data)
-        sample_storms = [
-            {
-                'event_id': 'TX-HAIL-2024-001',
-                'event_type': 'Hail Storm',
-                'date': '2024-11-15',
-                'time': '15:30',
-                'severity': 'Severe',
-                'hail_size': '2.5 inches',
-                'wind_speed': '70 mph',
-                'affected_counties': ['Dallas', 'Tarrant', 'Collin'],
-                'affected_zipcodes': ['75201', '75204', '75206', '76101', '76104', '75002', '75009'],
-                'damage_estimate': 'Moderate to Severe',
-                'insurance_claims_expected': 'High'
-            },
-            {
-                'event_id': 'TX-STORM-2024-002', 
-                'event_type': 'Severe Thunderstorm',
-                'date': '2024-10-28',
-                'time': '18:45',
-                'severity': 'Moderate',
-                'hail_size': '1.75 inches',
-                'wind_speed': '65 mph',
-                'affected_counties': ['Denton', 'Ellis'],
-                'affected_zipcodes': ['76201', '76205', '75104', '75119'],
-                'damage_estimate': 'Moderate',
-                'insurance_claims_expected': 'Medium'
-            },
-            {
-                'event_id': 'TX-HAIL-2024-003',
-                'event_type': 'Hail Storm',
-                'date': '2024-09-12',
-                'time': '14:20',
-                'severity': 'Extreme', 
-                'hail_size': '3.0 inches',
-                'wind_speed': '80 mph',
-                'affected_counties': ['Harris', 'Fort Bend'],
-                'affected_zipcodes': ['77001', '77002', '77003', '77469', '77478'],
-                'damage_estimate': 'Severe',
-                'insurance_claims_expected': 'Very High'
-            },
-            {
-                'event_id': 'TX-STORM-2024-004',
-                'event_type': 'Tornado/Hail',
-                'date': '2024-08-05',
-                'time': '19:15',
-                'severity': 'Severe',
-                'hail_size': '2.0 inches',
-                'wind_speed': '85 mph',
-                'affected_counties': ['Bexar', 'Travis'],
-                'affected_zipcodes': ['78201', '78202', '78701', '78702'],
-                'damage_estimate': 'Severe',
-                'insurance_claims_expected': 'High'
-            },
-            {
-                'event_id': 'TX-HAIL-2024-005',
-                'event_type': 'Hail Storm',
-                'date': '2024-07-20',
-                'time': '16:30',
-                'severity': 'Moderate',
-                'hail_size': '1.5 inches', 
-                'wind_speed': '55 mph',
-                'affected_counties': ['Montgomery', 'Rockwall'],
-                'affected_zipcodes': ['77301', '77302', '75032', '75087'],
-                'damage_estimate': 'Light to Moderate',
-                'insurance_claims_expected': 'Medium'
-            }
+        if not api_key:
+            # Fallback to known working key
+            api_key = "6972d80a231d2c07209e0ce837e34e69"
+        
+        return api_key
+    
+    def generate_storm_urls(self) -> List[str]:
+        """Generate storm data URLs for Texas weather services"""
+        # Current date for recent storm data
+        current_date = datetime.now()
+        thirty_days_ago = current_date - timedelta(days=30)
+        
+        base_urls = [
+            # National Weather Service Storm Reports - Texas
+            f"https://www.spc.noaa.gov/climo/reports/{thirty_days_ago.strftime('%y%m%d')}_rpts_filtered.html",
+            f"https://www.spc.noaa.gov/climo/reports/{current_date.strftime('%y%m%d')}_rpts_filtered.html",
+            
+            # Weather.gov Storm Events Database
+            "https://www.ncdc.noaa.gov/stormevents/listevents.jsp?eventType=ALL&beginDate_mm=01&beginDate_dd=01&beginDate_yyyy=2024&endDate_mm=12&endDate_dd=31&endDate_yyyy=2024&county=DALLAS%3A57&hailfilter=0.00&tornfilter=0&windfilter=000&sort=DT&submitbutton=Search&statefips=48%2CTEXAS",
+            
+            # Texas Weather Service - Hail Reports
+            "https://www.weather.gov/fwd/hailreports",
+            "https://www.weather.gov/ewx/hailreports",
+            
+            # Storm Prediction Center - Texas Hail Reports
+            "https://www.spc.noaa.gov/climo/reports/yesterday_filtered.html",
+            "https://www.spc.noaa.gov/climo/reports/today_filtered.html",
+            
+            # AccuWeather Storm Center - Dallas/Fort Worth
+            "https://www.accuweather.com/en/us/dallas-tx/75201/severe-weather/351194",
+            "https://www.accuweather.com/en/us/fort-worth-tx/76102/severe-weather/351200",
+            
+            # Weather Underground Storm Reports - Texas
+            "https://www.wunderground.com/severe/us/tx/dallas-county",
+            "https://www.wunderground.com/severe/us/tx/tarrant-county",
+            "https://www.wunderground.com/severe/us/tx/collin-county",
+            
+            # Local TV Weather Storm Reports
+            "https://www.nbcdfw.com/weather/severe-weather-alerts/",
+            "https://www.fox4news.com/weather/severe-weather",
+            
+            # Insurance Industry Storm Reports
+            "https://www.iii.org/fact-statistic/facts-statistics-hail",
+            
+            # Add more storm tracking URLs here
         ]
         
-        return sample_storms
+        return base_urls
+    
+    def get_scraperapi_url(self, target_url: str) -> str:
+        """Generate ScraperAPI URL with proper parameters"""
+        return f"http://api.scraperapi.com?api_key={self.scraper_api_key}&url={target_url}&render=true"
 
-    def get_recent_storm_events(self, days_back: int = 90) -> List[Dict]:
-        """Get storm events from the last N days"""
-        logger.info(f"📡 Fetching storm events from last {days_back} days...")
+    def parse_storm_listing(self, html: str, source_url: str) -> List[Dict[str, Any]]:
+        """Parse storm reports page and extract individual storm events"""
+        storm_events = []
         
         try:
-            # For now, use sample data
-            # In production, this would call real APIs
-            storm_events = self.create_sample_storm_data()
+            soup = BeautifulSoup(html, 'html.parser')
             
-            # Filter by date range
-            cutoff_date = datetime.now() - timedelta(days=days_back)
-            recent_storms = []
+            # Look for JSON data first (many weather sites use JavaScript)
+            script_tags = soup.find_all('script')
             
-            for storm in storm_events:
-                storm_date = datetime.strptime(storm['date'], '%Y-%m-%d')
-                if storm_date >= cutoff_date:
-                    recent_storms.append(storm)
-                    
-            logger.info(f"Found {len(recent_storms)} recent storm events")
-            self.storm_events = recent_storms
+            for script in script_tags:
+                if script.string and ('storm' in script.string.lower() or 'hail' in script.string.lower() or 'tornado' in script.string.lower()):
+                    try:
+                        # Try to extract JSON storm data
+                        json_match = re.search(r'(?:storms|events|reports)\s*[:=]\s*(\[.+?\])', script.string)
+                        if json_match:
+                            data = json.loads(json_match.group(1))
+                            storm_events.extend(self.extract_storms_from_json(data, source_url))
+                            break
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.debug(f"Error parsing JSON from script: {e}")
+                        continue
             
-            # Insert storm events into Supabase
-            for storm in recent_storms:
-                supabase_storm_data = {
-                    'event_id': storm['event_id'],
-                    'event_type': storm['event_type'],
-                    'event_date': storm['date'],
-                    'event_time': storm['time'],
-                    'severity': storm['severity'],
-                    'hail_size': storm['hail_size'],
-                    'wind_speed': storm['wind_speed'],
-                    'affected_counties': ','.join(storm['affected_counties']),
-                    'affected_zipcodes': ','.join(storm['affected_zipcodes']),
-                    'damage_estimate': storm['damage_estimate'],
-                    'insurance_claims_expected': storm['insurance_claims_expected']
-                }
-                
-                if insert_lead('storm_events', supabase_storm_data):
-                    logger.debug(f"✅ Inserted storm event: {storm['event_id']}")
+            # Fallback to HTML parsing if JSON not found
+            if not storm_events:
+                storm_events = self.parse_storm_html_listings(soup, source_url)
             
-            # Extract affected ZIP codes
-            for storm in recent_storms:
-                self.affected_zipcodes.update(storm['affected_zipcodes'])
-            
-            logger.info(f"Total affected ZIP codes: {len(self.affected_zipcodes)}")
-            return recent_storms
+            logger.info(f"Found {len(storm_events)} storm events from {source_url}")
             
         except Exception as e:
-            logger.error(f"Error fetching storm data: {e}")
-            return []
-
-    def match_properties_to_storms(self, properties: List[Dict]) -> List[Dict]:
-        """Match property data with storm events"""
-        logger.info("🎯 Matching properties to storm events...")
+            logger.error(f"❌ Error parsing storm listings from {source_url}: {e}")
         
-        if not self.storm_events:
-            logger.warning("No storm events to match against")
-            return properties
+        return storm_events
+    
+    def extract_storms_from_json(self, data: list, source_url: str) -> List[Dict[str, Any]]:
+        """Extract storm events from JSON data structure"""
+        storm_events = []
         
-        enhanced_properties = []
-        storm_matched_count = 0
+        try:
+            for storm_obj in data[:20]:  # Limit to first 20 per page
+                storm_data = self.extract_storm_from_json_obj(storm_obj, source_url)
+                if storm_data:
+                    storm_events.append(storm_data)
+                    
+        except Exception as e:
+            logger.debug(f"Error extracting from JSON: {e}")
         
-        for prop in properties:
-            prop_zipcode = str(prop.get('zipcode', ''))
-            enhanced_prop = prop.copy()
+        return storm_events
+    
+    def extract_storm_from_json_obj(self, storm_obj: dict, source_url: str) -> Optional[Dict[str, Any]]:
+        """Extract storm data from a single JSON storm object"""
+        try:
+            # Extract event ID
+            event_id = storm_obj.get('id', '') or storm_obj.get('event_id', '') or storm_obj.get('report_id', '')
             
-            # Check if property is in storm-affected area
-            if prop_zipcode in self.affected_zipcodes:
-                storm_matched_count += 1
-                
-                # Find all storms that affected this ZIP code
-                affecting_storms = []
-                for storm in self.storm_events:
-                    if prop_zipcode in storm['affected_zipcodes']:
-                        affecting_storms.append(storm)
-                
-                # Add storm data to property
-                enhanced_prop['storm_affected'] = True
-                enhanced_prop['storm_count'] = len(affecting_storms)
-                enhanced_prop['recent_storms'] = affecting_storms
-                
-                # Calculate storm priority boost
-                storm_priority = self.calculate_storm_priority(affecting_storms)
-                enhanced_prop['storm_priority'] = storm_priority
-                
-                # Boost lead score based on storm damage
-                original_score = enhanced_prop.get('lead_score', 5)
-                enhanced_prop['lead_score'] = min(original_score + storm_priority, 10)
-                enhanced_prop['storm_boost'] = storm_priority
-                
-                # Add most recent/severe storm details
-                if affecting_storms:
-                    most_recent = max(affecting_storms, key=lambda x: x['date'])
-                    enhanced_prop['latest_storm_date'] = most_recent['date']
-                    enhanced_prop['latest_storm_severity'] = most_recent['severity']
-                    enhanced_prop['latest_hail_size'] = most_recent['hail_size']
-            else:
-                enhanced_prop['storm_affected'] = False
-                enhanced_prop['storm_count'] = 0
-                enhanced_prop['storm_priority'] = 0
-                enhanced_prop['storm_boost'] = 0
+            # Extract event type
+            event_type = storm_obj.get('type', '') or storm_obj.get('event_type', '') or storm_obj.get('phenomenon', '')
             
-            enhanced_properties.append(enhanced_prop)
-        
-        logger.info(f"✅ Matched {storm_matched_count} properties to storm events")
-        return enhanced_properties
-
-    def calculate_storm_priority(self, storms: List[Dict]) -> int:
-        """Calculate priority boost based on storm severity and recency"""
-        if not storms:
-            return 0
-        
-        priority_boost = 0
-        
-        for storm in storms:
-            # Severity-based priority
-            severity = storm.get('severity', '').lower()
-            if 'extreme' in severity:
-                priority_boost += 4
-            elif 'severe' in severity:
-                priority_boost += 3
-            elif 'moderate' in severity:
-                priority_boost += 2
-            else:
-                priority_boost += 1
+            # Extract location information
+            city = storm_obj.get('city', '') or storm_obj.get('location', '') or storm_obj.get('place', '')
+            county = storm_obj.get('county', '') or storm_obj.get('county_name', '')
+            state = storm_obj.get('state', '') or storm_obj.get('st', '') or 'TX'
             
-            # Hail size priority
-            hail_size = storm.get('hail_size', '0 inches')
-            try:
-                size = float(hail_size.split()[0])
-                if size >= 2.5:
-                    priority_boost += 3
-                elif size >= 2.0:
-                    priority_boost += 2
-                elif size >= 1.5:
-                    priority_boost += 1
-            except:
-                pass
+            # Extract coordinates
+            latitude = storm_obj.get('lat', None) or storm_obj.get('latitude', None)
+            longitude = storm_obj.get('lon', None) or storm_obj.get('lng', None) or storm_obj.get('longitude', None)
             
-            # Recency bonus
-            try:
-                storm_date = datetime.strptime(storm['date'], '%Y-%m-%d')
-                days_ago = (datetime.now() - storm_date).days
-                
-                if days_ago <= 30:
-                    priority_boost += 2  # Very recent
-                elif days_ago <= 60:
-                    priority_boost += 1  # Recent
-            except:
-                pass
-        
-        return min(priority_boost, 5)  # Cap storm boost at 5
-
-    def generate_storm_report(self, enhanced_properties: List[Dict]) -> Dict[str, Any]:
-        """Generate comprehensive storm impact report"""
-        if not enhanced_properties:
-            return {}
-        
-        storm_affected = [p for p in enhanced_properties if p.get('storm_affected', False)]
-        high_priority = [p for p in storm_affected if p.get('storm_priority', 0) >= 4]
-        
-        # County-level storm impact
-        county_impact = {}
-        for prop in storm_affected:
-            county = prop.get('county', 'Unknown')
-            if county not in county_impact:
-                county_impact[county] = {
-                    'properties': 0,
-                    'avg_priority': 0,
-                    'storm_events': set()
+            # Extract event details
+            event_date = storm_obj.get('date', '') or storm_obj.get('event_date', '') or storm_obj.get('begin_date', '')
+            event_time = storm_obj.get('time', '') or storm_obj.get('event_time', '') or storm_obj.get('begin_time', '')
+            
+            # Extract magnitude/severity
+            magnitude = storm_obj.get('magnitude', '') or storm_obj.get('size', '') or storm_obj.get('max_hail_size', '')
+            wind_speed = storm_obj.get('wind_speed', None) or storm_obj.get('max_wind', None)
+            
+            # Extract damage information
+            damage_estimate = storm_obj.get('damage', 0) or storm_obj.get('damage_property', 0) or storm_obj.get('damage_crops', 0)
+            
+            # Extract description
+            description = storm_obj.get('description', '') or storm_obj.get('narrative', '') or storm_obj.get('comments', '')
+            
+            # Only create storm event if we have essential data
+            if event_id and event_type and city:
+                return {
+                    "event_id": event_id,
+                    "event_type": self.categorize_event_type(event_type),
+                    "event_date": self.parse_date(event_date),
+                    "event_time": event_time,
+                    "city": city,
+                    "county": county or self.get_county_from_city(city),
+                    "state": state,
+                    "latitude": float(latitude) if latitude else None,
+                    "longitude": float(longitude) if longitude else None,
+                    "magnitude": magnitude,
+                    "wind_speed_mph": int(wind_speed) if wind_speed else None,
+                    "hail_size_inches": self.parse_hail_size(magnitude),
+                    "damage_estimate": int(damage_estimate) if damage_estimate else None,
+                    "affected_areas": city,
+                    "weather_service_office": self.extract_weather_office(source_url),
+                    "description": description[:500] if description else None,  # Limit length
+                    "data_source": self.extract_source_name(source_url),
+                    "source_url": source_url,
+                    "severity_level": self.calculate_severity(event_type, magnitude, wind_speed, damage_estimate),
+                    "impact_radius_miles": self.estimate_impact_radius(event_type, magnitude),
+                    "roofing_lead_potential": self.calculate_roofing_potential(event_type, magnitude, damage_estimate),
+                    "notes": f"Scraped from weather service on {datetime.now().strftime('%Y-%m-%d')}"
                 }
             
-            county_impact[county]['properties'] += 1
-            county_impact[county]['avg_priority'] += prop.get('storm_priority', 0)
+            return None
             
-            # Track storm events per county
-            for storm in prop.get('recent_storms', []):
-                county_impact[county]['storm_events'].add(storm['event_id'])
+        except Exception as e:
+            logger.debug(f"Error extracting storm from JSON object: {e}")
+            return None
+    
+    def parse_storm_html_listings(self, soup, source_url: str) -> List[Dict[str, Any]]:
+        """Fallback HTML parsing if JSON data not available"""
+        storm_events = []
         
-        # Calculate averages
-        for county_data in county_impact.values():
-            if county_data['properties'] > 0:
-                county_data['avg_priority'] = round(
-                    county_data['avg_priority'] / county_data['properties'], 2
-                )
-                county_data['storm_events'] = len(county_data['storm_events'])
+        try:
+            # Look for storm report tables or cards in HTML
+            storm_selectors = [
+                'table.storm-reports tbody tr',
+                '.storm-event',
+                '.weather-report',
+                '.severe-weather-row',
+                '[data-storm-id]',
+                'tr[class*="storm"]',
+                '.report-row'
+            ]
+            
+            storm_rows = []
+            for selector in storm_selectors:
+                rows = soup.select(selector)
+                if rows:
+                    storm_rows = rows
+                    break
+            
+            for row in storm_rows[:15]:  # Limit to first 15
+                storm_data = self.extract_storm_from_html_row(row, source_url)
+                if storm_data:
+                    storm_events.append(storm_data)
+                    
+        except Exception as e:
+            logger.debug(f"Error in HTML fallback parsing: {e}")
         
-        return {
-            'total_properties': len(enhanced_properties),
-            'storm_affected_properties': len(storm_affected),
-            'storm_affected_percentage': round(len(storm_affected) / len(enhanced_properties) * 100, 1),
-            'high_priority_storm_leads': len(high_priority),
-            'total_storm_events': len(self.storm_events),
-            'affected_zipcodes': len(self.affected_zipcodes),
-            'county_impact': county_impact,
-            'recent_major_storms': [s for s in self.storm_events if s.get('severity') in ['Severe', 'Extreme']],
-            'generated_at': datetime.now().isoformat()
+        return storm_events
+    
+    def extract_storm_from_html_row(self, row, source_url: str) -> Optional[Dict[str, Any]]:
+        """Extract storm data from HTML table row or card"""
+        try:
+            # Extract text from all cells/elements
+            row_text = row.get_text()
+            cells = row.find_all(['td', 'div', 'span'])
+            
+            # Extract event type
+            event_type = ""
+            event_keywords = ['hail', 'tornado', 'wind', 'thunderstorm', 'severe', 'storm']
+            for keyword in event_keywords:
+                if keyword in row_text.lower():
+                    event_type = keyword.title()
+                    break
+            
+            # Extract location
+            city = ""
+            county = ""
+            for cell in cells:
+                cell_text = cell.get_text(strip=True)
+                # Look for city names or county patterns
+                if re.search(r'\\b[A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*\\b', cell_text) and len(cell_text) < 30:
+                    if 'county' in cell_text.lower():
+                        county = cell_text
+                    else:
+                        city = cell_text
+            
+            # Extract date
+            event_date = ""
+            for cell in cells:
+                cell_text = cell.get_text(strip=True)
+                # Look for date patterns
+                date_match = re.search(r'\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}', cell_text)
+                if date_match:
+                    event_date = date_match.group()
+                    break
+            
+            # Extract magnitude/size
+            magnitude = ""
+            for cell in cells:
+                cell_text = cell.get_text(strip=True)
+                # Look for hail size or wind speed
+                size_match = re.search(r'(\\d+(?:\\.\\d+)?)\\s*(?:inch|in|mph)', cell_text, re.I)
+                if size_match:
+                    magnitude = size_match.group()
+                    break
+            
+            # Generate a basic event ID from available data
+            event_id = f"{event_type}_{city}_{event_date}".replace(' ', '_').replace('/', '_')
+            
+            if event_type and city:
+                return {
+                    "event_id": event_id,
+                    "event_type": self.categorize_event_type(event_type),
+                    "event_date": self.parse_date(event_date),
+                    "event_time": None,
+                    "city": city,
+                    "county": county or self.get_county_from_city(city),
+                    "state": "TX",
+                    "latitude": None,
+                    "longitude": None,
+                    "magnitude": magnitude,
+                    "wind_speed_mph": None,
+                    "hail_size_inches": self.parse_hail_size(magnitude),
+                    "damage_estimate": None,
+                    "affected_areas": city,
+                    "weather_service_office": self.extract_weather_office(source_url),
+                    "description": None,
+                    "data_source": self.extract_source_name(source_url),
+                    "source_url": source_url,
+                    "severity_level": self.calculate_severity(event_type, magnitude, None, None),
+                    "impact_radius_miles": self.estimate_impact_radius(event_type, magnitude),
+                    "roofing_lead_potential": self.calculate_roofing_potential(event_type, magnitude, None),
+                    "notes": f"Scraped from weather HTML on {datetime.now().strftime('%Y-%m-%d')}"
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error extracting from HTML row: {e}")
+            return None
+    
+    def categorize_event_type(self, event_type: str) -> str:
+        """Categorize storm event type"""
+        event_lower = event_type.lower()
+        
+        if any(term in event_lower for term in ['hail', 'hailstorm']):
+            return "Hail"
+        elif any(term in event_lower for term in ['tornado', 'funnel']):
+            return "Tornado"
+        elif any(term in event_lower for term in ['wind', 'thunderstorm wind', 'straight-line']):
+            return "High Wind"
+        elif any(term in event_lower for term in ['thunderstorm', 'severe thunderstorm']):
+            return "Severe Thunderstorm"
+        elif any(term in event_lower for term in ['flood', 'flash flood']):
+            return "Flood"
+        else:
+            return "Severe Weather"
+    
+    def get_county_from_city(self, city: str) -> str:
+        """Map city names to counties for Texas"""
+        city_lower = city.lower()
+        
+        county_map = {
+            'dallas': 'Dallas County',
+            'fort worth': 'Tarrant County',
+            'arlington': 'Tarrant County',
+            'plano': 'Collin County',
+            'frisco': 'Collin County',
+            'mckinney': 'Collin County',
+            'allen': 'Collin County',
+            'irving': 'Dallas County',
+            'garland': 'Dallas County',
+            'mesquite': 'Dallas County',
+            'carrollton': 'Dallas County',
+            'richardson': 'Dallas County',
+            'lewisville': 'Denton County',
+            'flower mound': 'Denton County',
+            'southlake': 'Tarrant County',
+            'grapevine': 'Tarrant County',
+            'houston': 'Harris County',
+            'austin': 'Travis County',
+            'san antonio': 'Bexar County'
         }
-
-    def save_enhanced_properties_csv(self, enhanced_properties: List[Dict], filename: str = 'storm_enhanced_properties.csv'):
-        """Save storm-enhanced property data to CSV"""
-        if not enhanced_properties:
-            return
         
-        fieldnames = list(enhanced_properties[0].keys())
-        
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(enhanced_properties)
-        
-        logger.info(f"💾 Saved {len(enhanced_properties)} storm-enhanced properties to {filename}")
-
-    def save_storm_report_json(self, report: Dict, filename: str = 'storm_impact_report.json'):
-        """Save storm impact report to JSON"""
-        with open(filename, 'w', encoding='utf-8') as jsonfile:
-            json.dump(report, jsonfile, indent=2, default=str)
-        
-        logger.info(f"📊 Saved storm impact report to {filename}")
-
-
-def integrate_storm_data_with_properties(properties: List[Dict], days_back: int = 90) -> tuple:
-    """Main function to integrate storm data with property listings"""
-    logger.info("⛈️  Starting Storm Data Integration")
-    logger.info("=" * 50)
+        return county_map.get(city_lower, 'Unknown County')
     
-    integrator = StormDataIntegrator()
+    def parse_date(self, date_str: str) -> Optional[str]:
+        """Parse date string into ISO format"""
+        if not date_str:
+            return None
+        
+        try:
+            # Try different date formats
+            date_formats = [
+                '%Y-%m-%d',
+                '%m/%d/%Y',
+                '%m-%d-%Y',
+                '%Y/%m/%d',
+                '%m/%d/%y',
+                '%d/%m/%Y',
+                '%Y%m%d'
+            ]
+            
+            for fmt in date_formats:
+                try:
+                    parsed_date = datetime.strptime(date_str.strip(), fmt)
+                    return parsed_date.strftime('%Y-%m-%d')
+                except ValueError:
+                    continue
+            
+            return None
+        except:
+            return None
     
-    try:
-        # Get recent storm events
-        storm_events = integrator.get_recent_storm_events(days_back)
+    def parse_hail_size(self, magnitude: str) -> Optional[float]:
+        """Extract hail size in inches from magnitude string"""
+        if not magnitude:
+            return None
         
-        if not storm_events:
-            logger.warning("No recent storm events found")
-            return properties, {}
+        try:
+            # Look for inch measurements
+            inch_match = re.search(r'(\\d+(?:\\.\\d+)?)\\s*(?:inch|in)', magnitude, re.I)
+            if inch_match:
+                return float(inch_match.group(1))
+            
+            # Look for common hail size descriptions
+            size_map = {
+                'pea': 0.25,
+                'marble': 0.5,
+                'penny': 0.75,
+                'nickel': 0.88,
+                'quarter': 1.0,
+                'ping pong': 1.5,
+                'golf ball': 1.75,
+                'tennis ball': 2.5,
+                'baseball': 2.75,
+                'softball': 4.0
+            }
+            
+            magnitude_lower = magnitude.lower()
+            for size_name, inches in size_map.items():
+                if size_name in magnitude_lower:
+                    return inches
+            
+            return None
+        except:
+            return None
+    
+    def extract_weather_office(self, url: str) -> str:
+        """Extract weather service office from URL"""
+        office_map = {
+            'fwd': 'Fort Worth',
+            'ewx': 'Austin/San Antonio',
+            'hgx': 'Houston/Galveston',
+            'lub': 'Lubbock',
+            'maf': 'Midland',
+            'sjt': 'San Angelo'
+        }
         
-        # Match properties to storms
-        enhanced_properties = integrator.match_properties_to_storms(properties)
+        for code, office in office_map.items():
+            if code in url:
+                return office
         
-        # Generate comprehensive report
-        storm_report = integrator.generate_storm_report(enhanced_properties)
+        return 'National Weather Service'
+    
+    def extract_source_name(self, url: str) -> str:
+        """Extract readable source name from URL"""
+        if 'noaa.gov' in url or 'weather.gov' in url:
+            return 'National Weather Service'
+        elif 'spc.noaa.gov' in url:
+            return 'Storm Prediction Center'
+        elif 'accuweather.com' in url:
+            return 'AccuWeather'
+        elif 'wunderground.com' in url:
+            return 'Weather Underground'
+        elif 'nbcdfw.com' in url:
+            return 'NBC 5 Dallas-Fort Worth'
+        elif 'fox4news.com' in url:
+            return 'FOX 4 Dallas-Fort Worth'
+        else:
+            return 'Weather Service'
+    
+    def calculate_severity(self, event_type: str, magnitude: str, wind_speed: Optional[int], damage: Optional[int]) -> str:
+        """Calculate severity level based on storm characteristics"""
+        event_lower = event_type.lower() if event_type else ""
         
-        # Save results
-        integrator.save_enhanced_properties_csv(enhanced_properties)
-        integrator.save_storm_report_json(storm_report)
+        # High severity conditions
+        if 'tornado' in event_lower:
+            return 'Severe'
         
-        # Log summary
-        logger.info("📊 STORM INTEGRATION SUMMARY:")
-        logger.info(f"   • Total Properties: {storm_report.get('total_properties', 0)}")
-        logger.info(f"   • Storm-Affected: {storm_report.get('storm_affected_properties', 0)} ({storm_report.get('storm_affected_percentage', 0)}%)")
-        logger.info(f"   • High Priority Leads: {storm_report.get('high_priority_storm_leads', 0)}")
-        logger.info(f"   • Recent Storm Events: {storm_report.get('total_storm_events', 0)}")
-        logger.info(f"   • Affected ZIP Codes: {storm_report.get('affected_zipcodes', 0)}")
+        if magnitude:
+            hail_size = self.parse_hail_size(magnitude)
+            if hail_size and hail_size >= 1.0:  # Quarter size or larger
+                return 'Severe'
         
-        logger.info("🎯 High-Impact Counties:")
-        county_impact = storm_report.get('county_impact', {})
-        for county, impact in sorted(county_impact.items(), key=lambda x: x[1]['properties'], reverse=True)[:5]:
-            logger.info(f"   • {county}: {impact['properties']} properties, avg priority {impact['avg_priority']}")
+        if wind_speed and wind_speed >= 58:  # Severe thunderstorm criteria
+            return 'Severe'
         
-        logger.info("✅ Storm integration completed successfully!")
+        if damage and damage > 10000:
+            return 'Severe'
         
-        return enhanced_properties, storm_report
+        # Moderate severity
+        if any(term in event_lower for term in ['hail', 'thunderstorm', 'wind']):
+            return 'Moderate'
         
-    except Exception as e:
-        logger.error(f"❌ Storm integration failed: {e}")
-        return properties, {}
+        return 'Minor'
+    
+    def estimate_impact_radius(self, event_type: str, magnitude: str) -> Optional[int]:
+        """Estimate impact radius in miles"""
+        event_lower = event_type.lower() if event_type else ""
+        
+        if 'tornado' in event_lower:
+            return 10  # Tornado damage path plus surrounding area
+        
+        if 'hail' in event_lower:
+            hail_size = self.parse_hail_size(magnitude) if magnitude else 0
+            if hail_size and hail_size >= 1.0:
+                return 5  # Large hail storms affect wider areas
+            else:
+                return 2  # Small hail more localized
+        
+        if any(term in event_lower for term in ['wind', 'thunderstorm']):
+            return 8  # Wind damage can be widespread
+        
+        return 3  # Default radius
+    
+    def calculate_roofing_potential(self, event_type: str, magnitude: str, damage: Optional[int]) -> str:
+        """Calculate potential for roofing leads"""
+        event_lower = event_type.lower() if event_type else ""
+        
+        # High potential for roofing damage
+        if 'hail' in event_lower:
+            hail_size = self.parse_hail_size(magnitude) if magnitude else 0
+            if hail_size and hail_size >= 1.0:
+                return 'High'
+            else:
+                return 'Medium'
+        
+        if 'tornado' in event_lower:
+            return 'High'
+        
+        if any(term in event_lower for term in ['wind', 'thunderstorm']):
+            return 'Medium'
+        
+        if damage and damage > 5000:
+            return 'High'
+        
+        return 'Low'
+    
+    def scrape_single_url(self, url: str) -> List[Dict[str, Any]]:
+        """Scrape a single URL and return extracted storm events"""
+        if url in self.processed_urls:
+            return []
+        
+        try:
+            logger.info(f"🔍 Scraping {url}")
+            
+            # Get page with ScraperAPI
+            scraper_url = self.get_scraperapi_url(url)
+            response = self.session.get(scraper_url, timeout=60)
+            response.raise_for_status()
+            
+            # Parse storm events from page
+            storm_events = self.parse_storm_listing(response.text, url)
+            
+            # Insert each storm event into Supabase
+            successful_inserts = 0
+            for storm in storm_events:
+                if supabase.safe_insert("storm_events", storm):
+                    successful_inserts += 1
+            
+            self.processed_urls.add(url)
+            logger.info(f"✅ {url}: {successful_inserts}/{len(storm_events)} storm events inserted")
+            
+            return storm_events
+            
+        except requests.exceptions.Timeout:
+            logger.error(f"⏰ Timeout scraping {url}")
+            return []
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Request error for {url}: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Error scraping {url}: {e}")
+            return []
+    
+    def run_threaded_scraping(self, max_workers: int = 3) -> Dict[str, Any]:
+        """Run multi-threaded scraping of all target URLs"""
+        logger.info(f"🚀 Starting threaded storm data collection with {max_workers} workers")
+        logger.info(f"📊 Targeting {len(self.target_urls)} URLs")
+        
+        start_time = time.time()
+        all_storm_events = []
+        successful_urls = 0
+        failed_urls = 0
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all URLs for processing
+            future_to_url = {
+                executor.submit(self.scrape_single_url, url): url 
+                for url in self.target_urls
+            }
+            
+            # Process completed futures
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    storm_events = future.result()
+                    if storm_events:
+                        all_storm_events.extend(storm_events)
+                        successful_urls += 1
+                    else:
+                        failed_urls += 1
+                except Exception as e:
+                    logger.error(f"❌ Exception processing {url}: {e}")
+                    failed_urls += 1
+        
+        end_time = time.time()
+        runtime = end_time - start_time
+        
+        # Compile results
+        results = {
+            'total_urls': len(self.target_urls),
+            'successful_urls': successful_urls,
+            'failed_urls': failed_urls,
+            'total_storm_events': len(all_storm_events),
+            'runtime_seconds': runtime,
+            'average_per_url': runtime / len(self.target_urls) if self.target_urls else 0,
+            'events_per_minute': (len(all_storm_events) / runtime) * 60 if runtime > 0 else 0
+        }
+        
+        logger.info(f"📊 Scraping completed: {results['total_storm_events']} storm events in {runtime:.2f}s")
+        return results
+
 
 
 def main():
-    """Test function"""
-    # Sample property data for testing
-    sample_properties = [
-        {'address': '123 Main St, Dallas, TX', 'zipcode': '75201', 'county': 'Dallas County', 'lead_score': 6},
-        {'address': '456 Oak Ave, Fort Worth, TX', 'zipcode': '76101', 'county': 'Tarrant County', 'lead_score': 7},
-        {'address': '789 Elm St, Houston, TX', 'zipcode': '77001', 'county': 'Harris County', 'lead_score': 5}
-    ]
+    """Main execution function"""
+    print("⛈️ STORM INTEGRATION STARTING")
+    print("=" * 50)
     
-    enhanced_props, report = integrate_storm_data_with_properties(sample_properties)
+    # Check if storm_events table exists
+    if not supabase.check_table_exists("storm_events"):
+        print("❌ storm_events table does not exist!")
+        print("💡 Run the Supabase schema deployment first")
+        return 1
     
-    return len(enhanced_props)
+    # Initialize storm integration
+    storm_scraper = StormIntegration()
+    
+    # Run scraping
+    results = storm_scraper.run_threaded_scraping(max_workers=3)
+    
+    # Print final report
+    print("\n" + "=" * 50)
+    print("🎯 STORM INTEGRATION FINAL REPORT")
+    print("=" * 50)
+    print(f"📊 URLs Processed: {results['successful_urls']}/{results['total_urls']}")
+    print(f"✅ Total Storm Events Found: {results['total_storm_events']}")
+    print(f"⏱️ Runtime: {results['runtime_seconds']:.2f} seconds")
+    print(f"🚀 Speed: {results['events_per_minute']:.1f} events/minute")
+    print(f"📈 Success Rate: {(results['successful_urls']/results['total_urls']*100):.1f}%")
+    
+    # Check final database count
+    final_count = supabase.get_table_count("storm_events")
+    print(f"🗄️ Total Storm Events in Database: {final_count}")
+    
+    print("✅ STORM INTEGRATION COMPLETED!")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    exit_code = main()
+    sys.exit(exit_code)

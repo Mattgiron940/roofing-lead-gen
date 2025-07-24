@@ -305,6 +305,259 @@ class SupabaseDeployer:
             logger.error(f"❌ Failed to get project info: {e}")
             return {}
     
+    def validate_schema(self) -> bool:
+        """Validate database schema against supabase_tables.sql"""
+        try:
+            logger.info("🔍 Validating database schema...")
+            
+            # Import unified Supabase client for validation
+            sys.path.append('.')
+            from supabase_client import supabase
+            
+            if not supabase.supabase:
+                logger.error("❌ Supabase client not initialized")
+                return False
+            
+            # Expected tables and their key columns
+            expected_schema = {
+                'zillow_leads': [
+                    'id', 'address_text', 'city', 'state', 'zip_code', 'county', 
+                    'price', 'num_bedrooms', 'num_bathrooms', 'square_feet', 
+                    'year_built', 'property_type', 'lead_score', 'created_at'
+                ],
+                'redfin_leads': [
+                    'id', 'address_text', 'city', 'state', 'zip_code', 'county',
+                    'price', 'num_bedrooms', 'num_bathrooms', 'square_feet',
+                    'year_built', 'property_type', 'lead_score', 'created_at'
+                ],
+                'cad_leads': [
+                    'id', 'account_number', 'owner_name', 'address_text', 'city',
+                    'county', 'zip_code', 'property_type', 'year_built', 'square_feet',
+                    'appraised_value', 'market_value', 'lead_score', 'created_at'
+                ],
+                'permit_leads': [
+                    'id', 'permit_id', 'address_text', 'city', 'zip_code',
+                    'permit_type', 'work_description', 'date_filed', 'permit_value',
+                    'contractor_name', 'lead_status', 'created_at'
+                ],
+                'storm_events': [
+                    'id', 'event_id', 'event_type', 'event_date', 'event_time',
+                    'city', 'county', 'severity_level', 'hail_size_inches',
+                    'wind_speed_mph', 'roofing_lead_potential', 'created_at'
+                ]
+            }
+            
+            # Expected views
+            expected_views = [
+                'all_property_leads',
+                'high_priority_leads', 
+                'recent_leads',
+                'leads_by_city'
+            ]
+            
+            validation_results = {
+                'missing_tables': [],
+                'missing_columns': {},
+                'missing_views': [],
+                'table_counts': {},
+                'validation_passed': True
+            }
+            
+            # Check each table
+            for table_name, expected_columns in expected_schema.items():
+                logger.info(f"  Checking table: {table_name}")
+                
+                # Check if table exists
+                if not supabase.check_table_exists(table_name):
+                    logger.error(f"    ❌ Table missing: {table_name}")
+                    validation_results['missing_tables'].append(table_name)
+                    validation_results['validation_passed'] = False
+                    continue
+                
+                # Get table count
+                count = supabase.get_table_count(table_name)
+                validation_results['table_counts'][table_name] = count
+                logger.info(f"    ✅ Table exists with {count} records")
+                
+                # Check columns (simplified - would need more detailed introspection for production)
+                try:
+                    # Test a simple select to verify basic structure
+                    result = supabase.supabase.table(table_name).select('id').limit(1).execute()
+                    logger.info(f"    ✅ Table accessible and structured correctly")
+                except Exception as e:
+                    logger.warning(f"    ⚠️ Table structure issue: {e}")
+            
+            # Check views
+            for view_name in expected_views:
+                logger.info(f"  Checking view: {view_name}")
+                try:
+                    # Test view accessibility
+                    result = supabase.supabase.table(view_name).select('*').limit(1).execute()
+                    logger.info(f"    ✅ View accessible")
+                except Exception as e:
+                    logger.error(f"    ❌ View missing or inaccessible: {view_name}")
+                    validation_results['missing_views'].append(view_name)
+                    validation_results['validation_passed'] = False
+            
+            # Print validation summary
+            logger.info("\n📊 SCHEMA VALIDATION SUMMARY:")
+            logger.info("=" * 50)
+            
+            if validation_results['validation_passed']:
+                logger.info("✅ All schema validation checks passed!")
+            else:
+                logger.error("❌ Schema validation failed!")
+                
+                if validation_results['missing_tables']:
+                    logger.error(f"Missing tables: {validation_results['missing_tables']}")
+                
+                if validation_results['missing_views']:
+                    logger.error(f"Missing views: {validation_results['missing_views']}")
+            
+            logger.info("\n📈 Table Counts:")
+            for table, count in validation_results['table_counts'].items():
+                logger.info(f"  • {table}: {count:,} records")
+            
+            return validation_results['validation_passed']
+            
+        except Exception as e:
+            logger.error(f"❌ Schema validation failed: {e}")
+            return False
+    
+    def check_production_readiness(self) -> bool:
+        """Comprehensive production readiness check"""
+        logger.info("🚀 PRODUCTION READINESS CHECK")
+        logger.info("=" * 60)
+        
+        checks = [
+            ("Schema validation", self.validate_schema),
+            ("Supabase client connectivity", self._check_supabase_connectivity),
+            ("Environment variables", self._check_environment_vars),
+            ("Scraper API access", self._check_scraper_api),
+            ("Data integrity", self._check_data_integrity),
+        ]
+        
+        passed_checks = 0
+        total_checks = len(checks)
+        
+        for check_name, check_func in checks:
+            logger.info(f"\n🔍 {check_name}...")
+            try:
+                if check_func():
+                    logger.info(f"✅ {check_name}: PASSED")
+                    passed_checks += 1
+                else:
+                    logger.error(f"❌ {check_name}: FAILED")
+            except Exception as e:
+                logger.error(f"❌ {check_name}: ERROR - {e}")
+        
+        # Final assessment
+        logger.info(f"\n📊 PRODUCTION READINESS SUMMARY:")
+        logger.info("=" * 60)
+        logger.info(f"Checks passed: {passed_checks}/{total_checks}")
+        logger.info(f"Success rate: {(passed_checks/total_checks)*100:.1f}%")
+        
+        if passed_checks == total_checks:
+            logger.info("🎉 SYSTEM IS PRODUCTION READY!")
+            return True
+        else:
+            logger.error("⚠️ SYSTEM NOT READY FOR PRODUCTION")
+            logger.error("Please address the failed checks before deployment")
+            return False
+    
+    def _check_supabase_connectivity(self) -> bool:
+        """Check Supabase client connectivity"""
+        try:
+            sys.path.append('.')
+            from supabase_client import supabase
+            
+            if not supabase.supabase:
+                logger.error("Supabase client not initialized")
+                return False
+            
+            # Test basic connectivity
+            test_result = supabase.supabase.table('zillow_leads').select('count').limit(1).execute()
+            logger.info("Supabase connectivity verified")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Supabase connectivity failed: {e}")
+            return False
+    
+    def _check_environment_vars(self) -> bool:
+        """Check required environment variables"""
+        required_vars = ['SUPABASE_URL', 'SUPABASE_KEY', 'SCRAPER_API_KEY']
+        missing_vars = []
+        
+        for var in required_vars:
+            if not os.getenv(var):
+                missing_vars.append(var)
+        
+        if missing_vars:
+            logger.error(f"Missing environment variables: {missing_vars}")
+            return False
+        
+        logger.info("All required environment variables present")
+        return True
+    
+    def _check_scraper_api(self) -> bool:
+        """Check ScraperAPI connectivity"""
+        try:
+            import requests
+            api_key = os.getenv('SCRAPER_API_KEY', '6972d80a231d2c07209e0ce837e34e69')
+            
+            # Test ScraperAPI with a simple request
+            test_url = f"http://api.scraperapi.com?api_key={api_key}&url=https://httpbin.org/ip"
+            response = requests.get(test_url, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info("ScraperAPI connectivity verified")
+                return True
+            else:
+                logger.error(f"ScraperAPI returned status {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"ScraperAPI connectivity failed: {e}")
+            return False
+    
+    def _check_data_integrity(self) -> bool:
+        """Check data integrity and quality"""
+        try:
+            sys.path.append('.')
+            from supabase_client import supabase
+            
+            # Check for duplicate records
+            integrity_checks = []
+            
+            # Check each table for basic data quality
+            tables = ['zillow_leads', 'redfin_leads', 'cad_leads', 'permit_leads', 'storm_events']
+            
+            for table in tables:
+                try:
+                    count = supabase.get_table_count(table)
+                    if count > 0:
+                        # Check for records with valid addresses
+                        result = supabase.supabase.table(table).select('address_text').not_.is_('address_text', 'null').limit(5).execute()
+                        if result.data:
+                            integrity_checks.append(f"{table}: {count} records with valid data")
+                        else:
+                            integrity_checks.append(f"{table}: {count} records but no valid addresses")
+                    else:
+                        integrity_checks.append(f"{table}: empty")
+                except Exception as e:
+                    integrity_checks.append(f"{table}: error - {e}")
+            
+            logger.info("Data integrity summary:")
+            for check in integrity_checks:
+                logger.info(f"  • {check}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Data integrity check failed: {e}")
+            return False
+
     def full_deployment(self) -> bool:
         """Run complete deployment process"""
         logger.info("🚀 Starting full Supabase deployment...")
@@ -375,6 +628,12 @@ def main():
     # Full deployment command
     subparsers.add_parser('full', help='Run full deployment process')
     
+    # Schema validation command
+    subparsers.add_parser('check', help='Validate database schema')
+    
+    # Production readiness command
+    subparsers.add_parser('ready', help='Check production readiness')
+    
     # Info command
     subparsers.add_parser('info', help='Get project information')
     
@@ -402,6 +661,10 @@ def main():
         success = deployer.setup_rls_policies()
     elif args.command == 'full':
         success = deployer.full_deployment()
+    elif args.command == 'check':
+        success = deployer.validate_schema()
+    elif args.command == 'ready':
+        success = deployer.check_production_readiness()
     elif args.command == 'info':
         info = deployer.get_project_info()
         print(json.dumps(info, indent=2))

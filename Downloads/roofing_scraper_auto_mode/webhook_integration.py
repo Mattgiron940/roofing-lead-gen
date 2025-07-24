@@ -12,7 +12,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import logging
 from dataclasses import dataclass
-from supabase_config import SupabaseConnection
+import sys
+
+# Add current directory to path
+sys.path.append('.')
+from supabase_client import supabase
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -28,7 +32,6 @@ class WebhookConfig:
 
 class WebhookManager:
     def __init__(self):
-        self.supabase_conn = SupabaseConnection()
         self.webhooks = self.load_webhook_configs()
         self.processed_leads = set()  # Track processed leads to avoid duplicates
         
@@ -82,21 +85,21 @@ class WebhookManager:
         return webhooks
     
     def get_new_leads(self, minutes_back: int = 5) -> List[Dict[str, Any]]:
-        """Get leads created in the last N minutes"""
-        if not self.supabase_conn.supabase:
+        """Get leads created in the last N minutes from all sources"""
+        if not supabase.supabase:
             logger.error("Supabase not available")
             return []
         
         cutoff_time = (datetime.now() - timedelta(minutes=minutes_back)).isoformat()
         
-        # Tables to monitor
-        tables = ['zillow_leads', 'redfin_leads', 'cad_leads', 'permit_leads']
+        # Tables to monitor - now includes storm events
+        tables = ['zillow_leads', 'redfin_leads', 'cad_leads', 'permit_leads', 'storm_events']
         
         all_new_leads = []
         
         for table in tables:
             try:
-                result = self.supabase_conn.supabase.table(table)\
+                result = supabase.supabase.table(table)\
                     .select("*")\
                     .gte('created_at', cutoff_time)\
                     .order('created_at', desc=True)\
@@ -106,7 +109,7 @@ class WebhookManager:
                     for lead in result.data:
                         # Add source information
                         lead['source_table'] = table
-                        lead['source_type'] = table.replace('_leads', '')
+                        lead['source_type'] = table.replace('_leads', '').replace('_events', '')
                         
                         # Create unique identifier to prevent duplicates
                         lead_id = f"{table}_{lead['id']}"
@@ -124,55 +127,81 @@ class WebhookManager:
     
     def format_lead_for_webhook(self, lead: Dict[str, Any]) -> Dict[str, Any]:
         """Format lead data for webhook consumption"""
-        # Standardize field names across different lead types
+        source_type = lead.get('source_type', 'unknown')
+        
+        # Base formatted lead structure
         formatted_lead = {
             'id': lead.get('id'),
-            'source': lead.get('source_type', 'unknown'),
+            'source': source_type,
             'created_at': lead.get('created_at'),
             'updated_at': lead.get('updated_at'),
             
-            # Contact information
-            'address': lead.get('address_text', ''),
+            # Location information (always present)
             'city': lead.get('city', ''),
             'state': lead.get('state', 'TX'),
             'zip_code': lead.get('zip_code', ''),
             'county': lead.get('county', ''),
             
-            # Property details
-            'price': lead.get('price', 0) or lead.get('appraised_value', 0),
-            'property_type': lead.get('property_type', ''),
-            'year_built': lead.get('year_built'),
-            'square_feet': lead.get('square_feet'),
-            
-            # Lead scoring
-            'lead_score': lead.get('lead_score', 0) or lead.get('lead_priority', 0),
-            'priority': self.get_priority_label(lead.get('lead_score', 0) or lead.get('lead_priority', 0)),
-            
-            # Source-specific data
-            'source_url': lead.get('zillow_url') or lead.get('redfin_url') or lead.get('cad_url', ''),
-            'mls_number': lead.get('mls_number', ''),
-            'account_number': lead.get('account_number', ''),
-            'permit_id': lead.get('permit_id', ''),
-            'owner_name': lead.get('owner_name', ''),
-            
-            # Additional context
-            'storm_affected': lead.get('storm_affected', False),
-            'homestead_exemption': lead.get('homestead_exemption', False),
+            # Lead scoring (universal across all sources)
+            'lead_score': lead.get('lead_score', 0),
+            'priority': self.get_priority_label(lead.get('lead_score', 0)),
             
             # Metadata for tracking
             'webhook_timestamp': datetime.now().isoformat(),
-            'lead_unique_id': f"{lead.get('source_type', 'unknown')}_{lead.get('id')}"
+            'lead_unique_id': f"{source_type}_{lead.get('id')}"
         }
         
-        # Add permit-specific fields
-        if lead.get('source_type') == 'permit':
+        # Property-specific fields (for property leads)
+        if source_type in ['zillow', 'redfin', 'cad']:
             formatted_lead.update({
+                'address': lead.get('address_text', ''),
+                'price': lead.get('price', 0) or lead.get('appraised_value', 0),
+                'property_type': lead.get('property_type', ''),
+                'year_built': lead.get('year_built'),
+                'square_feet': lead.get('square_feet'),
+                'source_url': lead.get('zillow_url') or lead.get('redfin_url') or lead.get('cad_url') or lead.get('source_url', ''),
+                'mls_number': lead.get('mls_number', ''),
+                'account_number': lead.get('account_number', ''),
+                'owner_name': lead.get('owner_name', ''),
+                'homestead_exemption': lead.get('homestead_exemption', False)
+            })
+        
+        # Permit-specific fields
+        if source_type == 'permit':
+            formatted_lead.update({
+                'address': lead.get('address_text', ''),
+                'permit_id': lead.get('permit_id', ''),
                 'permit_type': lead.get('permit_type', ''),
+                'work_type': lead.get('work_type', ''),
                 'work_description': lead.get('work_description', ''),
-                'permit_value': lead.get('permit_value', ''),
+                'permit_value': lead.get('permit_value', 0),
                 'contractor_name': lead.get('contractor_name', ''),
+                'contractor_license': lead.get('contractor_license', ''),
                 'date_filed': lead.get('date_filed', ''),
-                'status': lead.get('status', '')
+                'date_issued': lead.get('date_issued', ''),
+                'permit_status': lead.get('permit_status', ''),
+                'permit_url': lead.get('permit_url', '')
+            })
+        
+        # Storm event-specific fields
+        if source_type == 'storm':
+            formatted_lead.update({
+                'event_id': lead.get('event_id', ''),
+                'event_type': lead.get('event_type', ''),
+                'event_date': lead.get('event_date', ''),
+                'event_time': lead.get('event_time', ''),
+                'severity_level': lead.get('severity_level', ''),
+                'hail_size_inches': lead.get('hail_size_inches', 0),
+                'wind_speed_mph': lead.get('wind_speed_mph', 0),
+                'damage_estimate': lead.get('damage_estimate', 0),
+                'affected_areas': lead.get('affected_areas', ''),
+                'weather_service_office': lead.get('weather_service_office', ''),
+                'roofing_lead_potential': lead.get('roofing_lead_potential', ''),
+                'impact_radius_miles': lead.get('impact_radius_miles', 0),
+                'data_source': lead.get('data_source', ''),
+                'description': lead.get('description', ''),
+                'latitude': lead.get('latitude'),
+                'longitude': lead.get('longitude')
             })
         
         return formatted_lead
@@ -320,7 +349,7 @@ class SupabaseWebhookTrigger:
     """Create Supabase database triggers for real-time webhook notifications"""
     
     def __init__(self):
-        self.supabase_conn = SupabaseConnection()
+        pass
     
     def create_webhook_trigger_function(self) -> str:
         """SQL function for webhook triggers"""
@@ -342,7 +371,7 @@ class SupabaseWebhookTrigger:
     
     def create_triggers_sql(self) -> str:
         """SQL to create triggers on all lead tables"""
-        tables = ['zillow_leads', 'redfin_leads', 'cad_leads', 'permit_leads']
+        tables = ['zillow_leads', 'redfin_leads', 'cad_leads', 'permit_leads', 'storm_events']
         
         sql_statements = [self.create_webhook_trigger_function()]
         
@@ -360,9 +389,6 @@ class SupabaseWebhookTrigger:
     
     def deploy_triggers(self) -> bool:
         """Deploy webhook triggers to Supabase"""
-        if not self.supabase_conn.supabase:
-            logger.error("Supabase not available")
-            return False
         
         try:
             sql = self.create_triggers_sql()
@@ -425,5 +451,6 @@ def main():
         return 0
 
 if __name__ == "__main__":
+    import sys
     exit_code = main()
     sys.exit(exit_code)

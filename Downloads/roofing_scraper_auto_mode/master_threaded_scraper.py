@@ -68,9 +68,10 @@ def run_parallel_scrapers():
     
     # Available scrapers
     scrapers = [
-        'threaded_cad_scraper',
-        'threaded_redfin_scraper', 
-        'threaded_permit_scraper'
+        'threaded_redfin_scraper',
+        'threaded_cad_scraper', 
+        'threaded_permit_scraper',
+        'storm_integration'
     ]
     
     print("🎯 MASTER THREADED SCRAPER STARTING")
@@ -154,7 +155,7 @@ def print_final_report(results, total_runtime):
     # Supabase status
     print(f"\n📊 Data Storage:")
     print(f"   • All scraped data automatically inserted into Supabase")
-    print(f"   • Tables: cad_leads, redfin_leads, permit_leads")
+    print(f"   • Tables: redfin_leads, cad_leads, permit_leads, storm_events")
     print(f"   • Check your Supabase dashboard for real-time data")
     
     print("\n✅ MASTER SCRAPER COMPLETED!")
@@ -176,19 +177,19 @@ def check_dependencies():
 
 def check_environment():
     """Check if environment variables are set"""
-    from config import SUPABASE_URL, SUPABASE_KEY, SCRAPER_API_KEY
-    
-    if not SUPABASE_URL:
-        print("❌ SUPABASE_URL not set in .env")
+    try:
+        from supabase_client import supabase
+        
+        # Check if supabase client is initialized
+        if supabase.supabase is None:
+            print("❌ Supabase client not initialized")
+            return False
+        
+        print("✅ Environment configuration OK")
+        return True
+    except Exception as e:
+        print(f"❌ Environment check failed: {e}")
         return False
-    if not SUPABASE_KEY:
-        print("❌ SUPABASE_KEY not set in .env")
-        return False
-    if not SCRAPER_API_KEY:
-        print("⚠️  SCRAPER_API_KEY not set, using default")
-    
-    print("✅ Environment configuration OK")
-    return True
 
 def main():
     """Main execution function"""

@@ -339,7 +339,13 @@ class LeadExporter:
         
         if not any(leads_data.values()):
             logger.info("ℹ️ No new leads found")
-            return {'status': 'no_leads', 'total_leads': 0}
+            return {
+                'status': 'no_leads', 
+                'total_leads': 0,
+                'source_breakdown': {},
+                'exported_files': [],
+                'sheets_url': None
+            }
         
         total_leads = sum(len(leads) for leads in leads_data.values())
         

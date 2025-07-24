@@ -777,5 +777,6 @@ def main():
     return 0
 
 if __name__ == "__main__":
+    import sys
     exit_code = main()
     sys.exit(exit_code)

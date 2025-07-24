@@ -14,7 +14,9 @@ import json
 from typing import Dict, List, Any
 import logging
 
-from supabase_config import SupabaseConnection
+import sys
+sys.path.append('.')
+from supabase_client import supabase
 
 # Configure page
 st.set_page_config(

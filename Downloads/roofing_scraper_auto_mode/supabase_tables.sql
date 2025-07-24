@@ -161,14 +161,22 @@ CREATE TABLE IF NOT EXISTS permit_leads (
     permit_id TEXT,
     address_text TEXT,
     city TEXT,
+    state TEXT,
     zip_code TEXT,
+    county TEXT,
     permit_type TEXT,
-    work_description TEXT,
+    work_type TEXT,
+    permit_value BIGINT,
     date_filed TEXT,
-    permit_value TEXT,
+    date_issued TEXT,
+    permit_status TEXT,
     contractor_name TEXT,
-    status TEXT,
-    lead_priority INTEGER,
+    contractor_license TEXT,
+    work_description TEXT,
+    square_footage INTEGER,
+    number_of_units INTEGER,
+    permit_url TEXT,
+    lead_score INTEGER,
     lead_status TEXT,
     priority TEXT,
     routing_tags TEXT,
@@ -186,11 +194,14 @@ CREATE TABLE IF NOT EXISTS permit_leads (
 -- Add indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_permit_leads_zip_code ON permit_leads(zip_code);
 CREATE INDEX IF NOT EXISTS idx_permit_leads_city ON permit_leads(city);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_county ON permit_leads(county);
 CREATE INDEX IF NOT EXISTS idx_permit_leads_permit_type ON permit_leads(permit_type);
-CREATE INDEX IF NOT EXISTS idx_permit_leads_lead_priority ON permit_leads(lead_priority);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_work_type ON permit_leads(work_type);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_lead_score ON permit_leads(lead_score);
 CREATE INDEX IF NOT EXISTS idx_permit_leads_permit_id ON permit_leads(permit_id);
 CREATE INDEX IF NOT EXISTS idx_permit_leads_contractor_name ON permit_leads(contractor_name);
 CREATE INDEX IF NOT EXISTS idx_permit_leads_date_filed ON permit_leads(date_filed);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_date_issued ON permit_leads(date_issued);
 
 -- Enable RLS
 ALTER TABLE permit_leads ENABLE ROW LEVEL SECURITY;
@@ -204,13 +215,24 @@ CREATE TABLE IF NOT EXISTS storm_events (
     event_type TEXT,
     event_date TEXT,
     event_time TEXT,
-    severity TEXT,
-    hail_size TEXT,
-    wind_speed TEXT,
-    affected_counties TEXT,
-    affected_zipcodes TEXT,
-    damage_estimate TEXT,
-    insurance_claims_expected TEXT,
+    city TEXT,
+    county TEXT,
+    state TEXT,
+    latitude DECIMAL,
+    longitude DECIMAL,
+    magnitude TEXT,
+    wind_speed_mph INTEGER,
+    hail_size_inches DECIMAL,
+    damage_estimate BIGINT,
+    affected_areas TEXT,
+    weather_service_office TEXT,
+    description TEXT,
+    data_source TEXT,
+    source_url TEXT,
+    severity_level TEXT,
+    impact_radius_miles INTEGER,
+    roofing_lead_potential TEXT,
+    notes TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -219,8 +241,12 @@ CREATE TABLE IF NOT EXISTS storm_events (
 CREATE INDEX IF NOT EXISTS idx_storm_events_event_id ON storm_events(event_id);
 CREATE INDEX IF NOT EXISTS idx_storm_events_event_date ON storm_events(event_date);
 CREATE INDEX IF NOT EXISTS idx_storm_events_event_type ON storm_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_storm_events_severity ON storm_events(severity);
-CREATE INDEX IF NOT EXISTS idx_storm_events_affected_zipcodes ON storm_events USING GIN (to_tsvector('english', affected_zipcodes));
+CREATE INDEX IF NOT EXISTS idx_storm_events_city ON storm_events(city);
+CREATE INDEX IF NOT EXISTS idx_storm_events_county ON storm_events(county);
+CREATE INDEX IF NOT EXISTS idx_storm_events_severity_level ON storm_events(severity_level);
+CREATE INDEX IF NOT EXISTS idx_storm_events_roofing_potential ON storm_events(roofing_lead_potential);
+CREATE INDEX IF NOT EXISTS idx_storm_events_wind_speed ON storm_events(wind_speed_mph);
+CREATE INDEX IF NOT EXISTS idx_storm_events_hail_size ON storm_events(hail_size_inches);
 
 -- Enable RLS
 ALTER TABLE storm_events ENABLE ROW LEVEL SECURITY;
