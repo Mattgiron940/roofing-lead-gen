@@ -8,6 +8,7 @@ import requests
 import json
 import time
 import random
+import os
 from datetime import datetime
 from typing import List, Dict, Any
 import logging
@@ -15,6 +16,7 @@ from supabase_client import supabase
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import queue
+from dfw_geo_filter import dfw_filter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -34,8 +36,11 @@ def fetch_with_scraperapi(target_url):
         return None
 
 class DFWRedfinScraper:
-    def __init__(self, max_workers=10):
-        self.max_workers = max_workers
+    def __init__(self, max_workers=5):
+        # DFW Upgrade: Use 5 concurrent threads as specified
+        self.max_workers = int(os.getenv('REDFIN_THREADS', max_workers))
+        self.lead_limit = int(os.getenv('DAILY_LEAD_LIMIT', 3000))
+        self.leads_processed_today = 0
         self.url_queue = queue.Queue()
         self.lock = threading.Lock()
         self.processed_count = 0
@@ -247,10 +252,26 @@ class DFWRedfinScraper:
             'parking_spaces': property_data['parking_spaces']
         }
         
+        # DFW Upgrade: Add DFW flag and check lead limit
+        if self.leads_processed_today >= self.lead_limit:
+            logger.warning(f"⚠️ Daily lead limit of {self.lead_limit} reached, skipping insertion")
+            return property_data
+            
+        # Add DFW flag to data
+        is_dfw = dfw_filter.is_dfw_lead({
+            'county': property_data.get('county'),
+            'zip_code': property_data.get('zipcode'),
+            'city': property_data.get('city')
+        })
+        
+        supabase_data['dfw'] = is_dfw
+        
         if supabase.insert_lead_with_deduplication('redfin_leads', supabase_data):
             with self.lock:
                 self.processed_count += 1
-            logger.debug(f"✅ Inserted Redfin property: {property_data['address']}")
+                if is_dfw:
+                    self.leads_processed_today += 1
+            logger.debug(f"✅ Inserted Redfin property (DFW: {is_dfw}): {property_data['address']}")
         
         return property_data
 
@@ -266,9 +287,10 @@ class DFWRedfinScraper:
             
             all_properties = []
             
-            # Process URLs with ThreadPoolExecutor
+            # DFW Upgrade: Process URLs with 5 concurrent threads
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                logger.info(f"🔄 Processing URLs with {self.max_workers} threads...")
+                logger.info(f"🔄 Processing URLs with {self.max_workers} threads (DFW targeted scraping)...")
+                logger.info(f"📊 Daily lead limit: {self.lead_limit}, Processed today: {self.leads_processed_today}")
                 
                 # Submit all URLs for processing
                 future_to_url = {executor.submit(self.process_redfin_url, url): url for url in urls}
@@ -286,8 +308,20 @@ class DFWRedfinScraper:
                         logger.error(f"❌ Error processing {url}: {e}")
             
             self.all_properties = all_properties
+            # DFW Upgrade: Filter and log DFW-specific results
+            dfw_properties = [p for p in all_properties if dfw_filter.is_dfw_lead({
+                'county': p.get('county'),
+                'zip_code': p.get('zipcode'), 
+                'city': p.get('city')
+            })]
+            
             logger.info(f"🎯 Total properties scraped: {len(all_properties)}")
+            logger.info(f"🗺️ DFW properties: {len(dfw_properties)} ({len(dfw_properties)/len(all_properties)*100:.1f}%)")
             logger.info(f"📊 Total properties inserted to Supabase: {self.processed_count}")
+            logger.info(f"📈 Daily lead limit utilization: {self.leads_processed_today}/{self.lead_limit} ({self.leads_processed_today/self.lead_limit*100:.1f}%)")
+            
+            # Export results to JSON and CSV
+            self.export_results(all_properties, dfw_properties)
             
             return self.all_properties
             
@@ -295,8 +329,41 @@ class DFWRedfinScraper:
             logger.error(f"❌ Error during threaded Redfin scraping: {e}")
             return []
 
+    def export_results(self, all_properties, dfw_properties):
+        """DFW Upgrade: Export results to JSON and CSV files"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            # Export to JSON
+            json_filename = f'redfin_results_{timestamp}.json'
+            with open(json_filename, 'w') as f:
+                json.dump({
+                    'total_properties': len(all_properties),
+                    'dfw_properties': len(dfw_properties),
+                    'thread_count': self.max_workers,
+                    'daily_limit': self.lead_limit,
+                    'processed_today': self.leads_processed_today,
+                    'properties': all_properties,
+                    'dfw_only': dfw_properties,
+                    'timestamp': datetime.now().isoformat()
+                }, f, indent=2)
+            
+            # Export to CSV
+            import csv
+            csv_filename = f'redfin_results_{timestamp}.csv'
+            if dfw_properties:
+                with open(csv_filename, 'w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=dfw_properties[0].keys())
+                    writer.writeheader()
+                    writer.writerows(dfw_properties)
+            
+            logger.info(f"📄 Exported results to {json_filename} and {csv_filename}")
+            
+        except Exception as e:
+            logger.error(f"Error exporting results: {e}")
+    
     def get_summary_stats(self):
-        """Get comprehensive summary statistics - same as Zillow"""
+        """Get comprehensive summary statistics - DFW enhanced"""
         if not self.all_properties:
             return {}
         
@@ -351,6 +418,13 @@ class DFWRedfinScraper:
             else:
                 lead_scores['low'] += 1
         
+        # DFW Upgrade: Add DFW-specific statistics
+        dfw_properties = [p for p in self.all_properties if dfw_filter.is_dfw_lead({
+            'county': p.get('county'),
+            'zip_code': p.get('zipcode'),
+            'city': p.get('city')
+        })]
+        
         return {
             'total_properties': len(self.all_properties),
             'total_market_value': total_value,
@@ -361,7 +435,12 @@ class DFWRedfinScraper:
             'price_ranges': price_ranges,
             'lead_scores': lead_scores,
             'scraped_at': datetime.now().isoformat(),
-            'source': 'Redfin'
+            'source': 'Redfin',
+            'dfw_properties': len(dfw_properties),
+            'dfw_percentage': round(len(dfw_properties) / len(self.all_properties) * 100, 1) if self.all_properties else 0,
+            'daily_limit_used': self.leads_processed_today,
+            'daily_limit_total': self.lead_limit,
+            'thread_count': self.max_workers
         }
 
 

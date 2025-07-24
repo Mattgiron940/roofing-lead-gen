@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Scalable Texas CAD Scraper
-Scrapes major Texas CAD sites (Tarrant, Dallas, Denton, Collin, etc.)
+DFW-Targeted Texas CAD Scraper - Upgraded for 5-Thread Concurrent Processing
+Scrapes major Texas CAD sites with focus on DFW area
 Outputs consistent CSV with address, name, value, year built
+DFW Upgrade: 5 concurrent threads, daily lead limits, DFW geo-filtering
 """
 
 import requests
@@ -10,6 +11,7 @@ import json
 import csv
 import time
 import random
+import os
 from datetime import datetime
 from typing import List, Dict, Any
 import logging
@@ -18,6 +20,7 @@ from supabase_client import supabase
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import queue
+from dfw_geo_filter import dfw_filter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -37,8 +40,11 @@ def fetch_with_scraperapi(target_url):
         return None
 
 class TexasCADScraper:
-    def __init__(self, max_workers=8):
-        self.max_workers = max_workers
+    def __init__(self, max_workers=5):
+        # DFW Upgrade: Use 5 concurrent threads as specified
+        self.max_workers = int(os.getenv('CAD_THREADS', max_workers))
+        self.lead_limit = int(os.getenv('DAILY_LEAD_LIMIT', 3000))
+        self.leads_processed_today = 0
         self.url_queue = queue.Queue()
         self.lock = threading.Lock()
         self.processed_count = 0
@@ -221,10 +227,26 @@ class TexasCADScraper:
                     'lead_score': property_data['lead_score']
                 }
                 
+                # DFW Upgrade: Add DFW flag and check lead limit
+                if self.leads_processed_today >= self.lead_limit:
+                    logger.warning(f"⚠️ Daily lead limit of {self.lead_limit} reached, skipping insertion")
+                    continue
+                    
+                # Add DFW flag to data
+                is_dfw = dfw_filter.is_dfw_lead({
+                    'county': property_data.get('county'),
+                    'zip_code': property_data.get('zipcode'),
+                    'city': property_data.get('city')
+                })
+                
+                supabase_data['dfw'] = is_dfw
+                
                 if supabase.insert_lead_with_deduplication('cad_leads', supabase_data):
                     with self.lock:
                         self.processed_count += 1
-                    logger.debug(f"✅ Inserted CAD property: {property_data['property_address']}")
+                        if is_dfw:
+                            self.leads_processed_today += 1
+                    logger.debug(f"✅ Inserted CAD property (DFW: {is_dfw}): {property_data['property_address']}")
                 
                 sample_properties.append(property_data)
         
@@ -426,10 +448,26 @@ class TexasCADScraper:
             'lead_score': property_data['lead_score']
         }
         
+        # DFW Upgrade: Add DFW flag and check lead limit
+        if self.leads_processed_today >= self.lead_limit:
+            logger.warning(f"⚠️ Daily lead limit of {self.lead_limit} reached, skipping insertion")
+            return property_data
+            
+        # Add DFW flag to data
+        is_dfw = dfw_filter.is_dfw_lead({
+            'county': property_data.get('county'),
+            'zip_code': property_data.get('zipcode'),
+            'city': property_data.get('city')
+        })
+        
+        supabase_data['dfw'] = is_dfw
+        
         if supabase.insert_lead_with_deduplication('cad_leads', supabase_data):
             with self.lock:
                 self.processed_count += 1
-            logger.debug(f"✅ Inserted CAD property: {property_data['property_address']}")
+                if is_dfw:
+                    self.leads_processed_today += 1
+            logger.debug(f"✅ Inserted CAD property (DFW: {is_dfw}): {property_data['property_address']}")
         
         return property_data
 
@@ -466,9 +504,10 @@ class TexasCADScraper:
             
             all_properties = []
             
-            # Process URLs with ThreadPoolExecutor
+            # DFW Upgrade: Process URLs with 5 concurrent threads
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                logger.info(f"🔄 Processing URLs with {self.max_workers} threads...")
+                logger.info(f"🔄 Processing URLs with {self.max_workers} threads (DFW targeted scraping)...")
+                logger.info(f"📊 Daily lead limit: {self.lead_limit}, Processed today: {self.leads_processed_today}")
                 
                 # Submit all URLs for processing
                 future_to_url = {executor.submit(self.process_cad_url, url_data): url_data for url_data in url_data_list}
@@ -497,8 +536,20 @@ class TexasCADScraper:
             for county, count in county_counts.items():
                 logger.info(f"   • {county}: {count} properties")
             
+            # DFW Upgrade: Filter and log DFW-specific results
+            dfw_properties = [p for p in all_properties if dfw_filter.is_dfw_lead({
+                'county': p.get('county'),
+                'zip_code': p.get('zipcode'), 
+                'city': p.get('city')
+            })]
+            
             logger.info(f"🎯 Total properties scraped: {len(all_properties)}")
+            logger.info(f"🗺️ DFW properties: {len(dfw_properties)} ({len(dfw_properties)/len(all_properties)*100:.1f}%)")
             logger.info(f"📊 Total properties inserted to Supabase: {self.processed_count}")
+            logger.info(f"📈 Daily lead limit utilization: {self.leads_processed_today}/{self.lead_limit} ({self.leads_processed_today/self.lead_limit*100:.1f}%)")
+            
+            # Export results to JSON and CSV
+            self.export_results(all_properties, dfw_properties)
             
             return all_properties
             
@@ -575,6 +626,38 @@ class TexasCADScraper:
             writer.writerows(self.all_properties)
         
         logger.info(f"💾 Saved {len(self.all_properties)} CAD properties to {filename}")
+
+    def export_results(self, all_properties, dfw_properties):
+        """DFW Upgrade: Export results to JSON and CSV files"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            # Export to JSON
+            json_filename = f'cad_results_{timestamp}.json'
+            with open(json_filename, 'w') as f:
+                json.dump({
+                    'total_properties': len(all_properties),
+                    'dfw_properties': len(dfw_properties),
+                    'thread_count': self.max_workers,
+                    'daily_limit': self.lead_limit,
+                    'processed_today': self.leads_processed_today,
+                    'properties': all_properties,
+                    'dfw_only': dfw_properties,
+                    'timestamp': datetime.now().isoformat()
+                }, f, indent=2)
+            
+            # Export to CSV
+            csv_filename = f'cad_results_{timestamp}.csv'
+            if dfw_properties:
+                with open(csv_filename, 'w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=dfw_properties[0].keys())
+                    writer.writeheader()
+                    writer.writerows(dfw_properties)
+            
+            logger.info(f"📄 Exported CAD results to {json_filename} and {csv_filename}")
+            
+        except Exception as e:
+            logger.error(f"Error exporting CAD results: {e}")
 
 
 def main():

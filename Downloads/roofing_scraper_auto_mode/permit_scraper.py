@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-DFW Roofing Permit Scraper
+DFW Roofing Permit Scraper - Upgraded for 5-Thread Concurrent Processing
 Scrapes Fort Worth and Dallas city permit sites for roofing permits
+DFW Upgrade: 5 concurrent threads, daily lead limits, DFW geo-filtering
 """
 
 import requests
@@ -9,6 +10,7 @@ import json
 import csv
 import time
 import random
+import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import logging
@@ -18,6 +20,7 @@ from supabase_client import supabase
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import queue
+from dfw_geo_filter import dfw_filter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -37,8 +40,11 @@ def fetch_with_scraperapi(target_url):
         return None
 
 class DFWPermitScraper:
-    def __init__(self, max_workers=6):
-        self.max_workers = max_workers
+    def __init__(self, max_workers=5):
+        # DFW Upgrade: Use 5 concurrent threads as specified
+        self.max_workers = int(os.getenv('PERMIT_THREADS', max_workers))
+        self.lead_limit = int(os.getenv('DAILY_LEAD_LIMIT', 3000))
+        self.leads_processed_today = 0
         self.url_queue = queue.Queue()
         self.lock = threading.Lock()
         self.processed_count = 0
@@ -367,8 +373,9 @@ class DFWPermitScraper:
 
     def scrape_all_permits(self) -> List[Dict]:
         """Scrape permits from all cities using threading and ScraperAPI"""
-        logger.info("🏗️ Starting Threaded DFW Permit Scraper with ScraperAPI")
+        logger.info("🏗️ Starting DFW-Targeted Permit Scraper with 5-Thread Processing")
         logger.info("=" * 50)
+        logger.info(f"📊 Daily lead limit: {self.lead_limit}, Processed today: {self.leads_processed_today}")
         
         try:
             # Generate target URLs
@@ -377,9 +384,9 @@ class DFWPermitScraper:
             
             all_permits = []
             
-            # Process URLs with ThreadPoolExecutor
+            # DFW Upgrade: Process URLs with 5 concurrent threads
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                logger.info(f"🔄 Processing URLs with {self.max_workers} threads...")
+                logger.info(f"🔄 Processing URLs with {self.max_workers} threads (DFW targeted scraping)...")
                 
                 # Submit all URLs for processing
                 future_to_url = {executor.submit(self.process_permit_url, url_data): url_data for url_data in url_data_list}

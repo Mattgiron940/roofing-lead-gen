@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Storm/Hail Damage Data Integration
+DFW-Targeted Storm/Hail Damage Data Integration - 5-Thread Processing
 Integrates HailTrace and NOAA feeds with scraped properties
 Matches ZIP codes to identify recent storm-hit areas for prioritization
+DFW Upgrade: 5 concurrent threads, daily lead limits, DFW geo-filtering
 """
 
 import requests
 import json
 import csv
+import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Set
 import logging
@@ -15,6 +17,7 @@ from supabase_client import supabase
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import queue
+from dfw_geo_filter import dfw_filter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -34,8 +37,11 @@ def fetch_with_scraperapi(target_url):
         return None
 
 class StormDataIntegrator:
-    def __init__(self, max_workers=4):
-        self.max_workers = max_workers
+    def __init__(self, max_workers=5):
+        # DFW Upgrade: Use 5 concurrent threads as specified
+        self.max_workers = int(os.getenv('STORM_THREADS', max_workers))
+        self.lead_limit = int(os.getenv('DAILY_LEAD_LIMIT', 3000))
+        self.leads_processed_today = 0
         self.url_queue = queue.Queue()
         self.lock = threading.Lock()
         self.processed_count = 0
@@ -172,10 +178,24 @@ class StormDataIntegrator:
                     'insurance_claims_expected': storm['insurance_claims_expected']
                 }
                 
+                # DFW Upgrade: Add DFW flag and check lead limit
+                if self.leads_processed_today >= self.lead_limit:
+                    logger.warning(f"⚠️ Daily lead limit of {self.lead_limit} reached, skipping storm event insertion")
+                    continue
+                    
+                # Add DFW flag to data
+                is_dfw = any(dfw_filter.is_dfw_lead({'county': county, 'zip_code': zip_code, 'city': None}) 
+                           for county in storm['affected_counties'] 
+                           for zip_code in storm['affected_zipcodes'])
+                
+                supabase_storm_data['dfw'] = is_dfw
+                
                 if supabase.insert_lead_with_deduplication('storm_events', supabase_storm_data):
                     with self.lock:
                         self.processed_count += 1
-                    logger.debug(f"✅ Inserted storm event: {storm['event_id']}")
+                        if is_dfw:
+                            self.leads_processed_today += 1
+                    logger.debug(f"✅ Inserted storm event (DFW: {is_dfw}): {storm['event_id']}")
             
             # Extract affected ZIP codes
             for storm in recent_storms:
@@ -335,10 +355,26 @@ class StormDataIntegrator:
             'roofing_lead_potential': storm_event['roofing_lead_potential']
         }
         
+        # DFW Upgrade: Add DFW flag and check lead limit
+        if self.leads_processed_today >= self.lead_limit:
+            logger.warning(f"⚠️ Daily lead limit of {self.lead_limit} reached, skipping storm event insertion")
+            return storm_event
+            
+        # Add DFW flag to data
+        is_dfw = dfw_filter.is_dfw_lead({
+            'county': storm_event.get('county'),
+            'zip_code': None,  # Storm events don't have single zip
+            'city': storm_event.get('city')
+        })
+        
+        supabase_storm_data['dfw'] = is_dfw
+        
         if supabase.insert_lead_with_deduplication('storm_events', supabase_storm_data):
             with self.lock:
                 self.processed_count += 1
-            logger.debug(f"✅ Inserted storm event: {storm_event['event_id']}")
+                if is_dfw:
+                    self.leads_processed_today += 1
+            logger.debug(f"✅ Inserted storm event (DFW: {is_dfw}): {storm_event['event_id']}")
         
         return storm_event
 
@@ -354,9 +390,10 @@ class StormDataIntegrator:
             
             all_storm_events = []
             
-            # Process URLs with ThreadPoolExecutor
+            # DFW Upgrade: Process URLs with 5 concurrent threads
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                logger.info(f"🔄 Processing URLs with {self.max_workers} threads...")
+                logger.info(f"🔄 Processing URLs with {self.max_workers} threads (DFW targeted storm data)...")
+                logger.info(f"📊 Daily lead limit: {self.lead_limit}, Processed today: {self.leads_processed_today}")
                 
                 # Submit all URLs for processing
                 future_to_url = {executor.submit(self.process_storm_url, url_data): url_data for url_data in url_data_list}
