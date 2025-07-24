@@ -1,1 +1,0 @@
-// essay.tsx placeholder content

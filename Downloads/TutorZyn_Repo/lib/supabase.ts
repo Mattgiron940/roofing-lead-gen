@@ -1,1 +1,0 @@
-// supabase.ts placeholder content

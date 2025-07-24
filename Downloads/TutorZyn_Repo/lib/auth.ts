@@ -1,1 +1,0 @@
-// auth.ts placeholder content
