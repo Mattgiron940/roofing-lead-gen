@@ -1,6 +1,33 @@
 {
-  "sms_message": "Hey {{name}}, we noticed a recent storm in your area. Would you like a free roof inspection today?",
-  "vm_drop_message": "Hi, it's Matt from Elevation Roofing. We're offering free inspections this week — no obligation.",
-  "live_call_transfer_enabled": true,
-  "callback_number": "+18885551234"
+  "ghl_integration": {
+    "sms_message": "Hey {{name}}, we noticed a recent storm in your area. Would you like a free roof inspection today?",
+    "vm_drop_message": "Hi, it's Matt from Elevation Roofing. We're offering free inspections this week — no obligation.",
+    "live_call_transfer_enabled": true,
+    "callback_number": "+18885551234",
+    "workflow_trigger": "dfw_roofing_lead",
+    "high_priority_threshold": 8
+  },
+  "zapier_integration": {
+    "enabled": true,
+    "dfw_filter_only": true,
+    "min_lead_score": 6,
+    "batch_processing": true,
+    "max_retries": 3,
+    "timeout_seconds": 15,
+    "workflow_triggers": {
+      "storm_leads": "immediate",
+      "high_score_leads": "priority",
+      "standard_leads": "normal"
+    }
+  },
+  "lead_routing": {
+    "storm_affected_priority": 1,
+    "high_score_priority": 2,
+    "dfw_only": true,
+    "follow_up_schedule": {
+      "storm_leads": 1,
+      "high_priority": 2,
+      "standard": 3
+    }
+  }
 }

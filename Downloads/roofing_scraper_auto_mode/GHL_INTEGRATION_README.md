@@ -35,11 +35,12 @@ This update transforms the roofing lead generation system into a highly targeted
 
 ```
 roofing_scraper_auto_mode/
-├── ghl_automation/                 # GHL Integration Module
+├── ghl_automation/                 # GHL & Zapier Integration Module
 │   ├── __init__.py
-│   ├── ghl_config.json            # GHL Configuration
-│   ├── ghl_webhook_trigger.py     # Webhook Triggers
-│   └── ghl_workflow_manager.py    # Workflow Management
+│   ├── ghl_config.json            # GHL & Zapier Configuration
+│   ├── ghl_webhook_trigger.py     # GHL Webhook Triggers
+│   ├── ghl_workflow_manager.py    # GHL Workflow Management
+│   └── zapier_workflow_manager.py # Zapier Automation (Enhanced)
 ├── dfw_geo_filter.py              # DFW Geographic Filtering
 ├── lead_limit_controller.py       # Daily Lead Management
 ├── dfw_logging_system.py          # Comprehensive Logging
@@ -68,6 +69,14 @@ SCRAPERAPI_KEY=your_scraper_api_key
 # GHL Integration
 GHL_WEBHOOK_URL=your_ghl_webhook_url
 GHL_API_KEY=your_ghl_api_key
+
+# Zapier Integration
+ZAPIER_WEBHOOK_URL=your_zapier_webhook_url
+ZAPIER_BACKUP_WEBHOOK_URL=your_backup_zapier_url
+ZAPIER_DFW_ONLY=true
+ZAPIER_MIN_LEAD_SCORE=6
+ZAPIER_TIMEOUT=15
+ZAPIER_MAX_RETRIES=3
 ```
 
 ### GHL Configuration (`ghl_automation/ghl_config.json`)
